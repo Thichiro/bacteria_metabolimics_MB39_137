@@ -1,0 +1,255 @@
+---
+title: "histogram_bacteria"
+format: html
+editor: visual
+---
+
+# Pacotes
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(ggridges)
+library(tidyr)
+library(readxl)
+library(stringr)
+library(fs)
+library(purrr)
+```
+
+# Carregando dados
+
+```{r}
+s_proteamaculans_137 <- read_excel("137_histogram.xlsx", range = cell_limits(c(1, 1), c(NA, 2))
+)
+b_gladioli_MB39 <- read_excel("MB39_histogram.xlsx", range = cell_limits(c(1, 1), c(NA, 2))
+)
+
+all_bacteria <- bind_rows(s_proteamaculans_137, b_gladioli_MB39) |> 
+  select("m/z", n) |> 
+  rename(m_z = "m/z")
+
+sirius <- read_excel("canopus_structure_summary.xlsx") |> 
+  rename(id = mappingFeatureId)
+
+sirius_annotation <- sirius |> 
+  select(
+    class = 'ClassyFire#class',
+    id
+  ) |> 
+  mutate(id = as.character(id))
+
+
+mzmine_bacteria <- read_excel("bacteria_feature_pos.xlsx") |> 
+   select(
+    id, # Usando a coluna 'id' do usuário como identificador de pico
+    mz,
+    rt,
+    ends_with(":area"))
+
+
+mzmine_long <- mzmine_bacteria %>%
+  # Transforma colunas de área em linhas (Long format)
+  pivot_longer(
+    cols = ends_with(":area"),
+    names_to = "Sample_Name_Raw",
+    values_to = "Area"
+  ) %>%
+  
+  # Filtra detecções válidas (Area > 0)
+  filter(Area > 0) %>%
+  
+  # Extração de Metadados:
+  mutate(
+    isolate_id_raw = str_remove(Sample_Name_Raw, "\\.mzML:area$"),
+    isolate_id_limpo = str_replace(isolate_id_raw, "datafile:", ""),
+    
+    Isolado = str_extract(isolate_id_limpo, "^[^_]+"),
+    Isolado = if_else(Isolado == "RSZ", "MB39", Isolado),
+    Especie = case_when(
+      Isolado == "137" ~ "Serratia_proteamaculans",
+      Isolado == "MB39" ~ "Burkholderia_gladioli",
+      TRUE ~ "Espécie Indefinida"
+  )) |> 
+  select(-Sample_Name_Raw, -isolate_id_raw, -isolate_id_limpo) |> 
+  rename(isolate = Isolado,
+         specie = Especie
+         ) |> 
+  mutate(id = as.character(id))
+
+
+mzmine_sirius <- left_join(mzmine_long, sirius_annotation, by = "id")
+
+resumo_classes <- mzmine_sirius |> 
+  count(specie, class) |> 
+  group_by(specie) %>%
+  mutate(
+    freq_relativa = n / sum(n),
+    percentual = scales::percent(freq_relativa, accuracy = 1)
+  )
+
+limite_corte <- 0.01
+resumo_classes_limpo <- resumo_classes %>%
+  mutate(class = ifelse(freq_relativa < limite_corte, "Others", class)) %>%
+  # Recalcula as somas pois agora temos vários "Outros"
+  group_by(specie, class) %>%
+  summarise(freq_relativa = sum(freq_relativa), .groups = "drop")
+
+```
+
+#carregando dados
+
+```{r}
+lista_de_arquivos <- fs::dir_ls(path = "C:/Users/thiro/OneDrive/Documents/doutorado_ufv/artigos_doutorado/gisele_artigo/metabolomics/histogram", glob = "*.xlsx")
+
+
+nomes_id <- lista_de_arquivos |> 
+  fs::path_file() |>     # Pega só o nome do arquivo (ex: "bacteria_A.xlsx")
+  str_remove(pattern = "_.*")    # Remove a extensão (ex: "bacteria_A")
+
+# Atribuir esses nomes limpos à lista
+names(lista_de_arquivos) <- nomes_id
+
+print(lista_de_arquivos)
+
+ler_um_arquivo <- function(caminho_arquivo) {
+  
+  dados_lidos <- read_excel(
+    caminho_arquivo,
+    # Começa na Linha 2, Coluna 1 e vai até o fim da Coluna 2
+    range = cell_limits(c(2, 1), c(NA, 2)),
+    # Define os nomes corretos
+    col_names = c("m_z", "n") 
+  )
+  
+  # MUITO IMPORTANTE: Converter para número
+  dados_numericos <- dados_lidos %>%
+    # Ignora avisos se alguma linha não for número
+    suppressWarnings() %>% 
+    mutate(
+      m_z = as.numeric(m_z),
+      n = as.numeric(n)
+    ) %>%
+    # Remove linhas que não puderam ser convertidas (ex: cabeçalhos)
+    filter(!is.na(m_z) & !is.na(n)) 
+    
+  return(dados_numericos)
+}
+
+# ----------------------------------------------------------------
+# PASSO 3: Ler TODOS os arquivos e criar o data frame final
+# ----------------------------------------------------------------
+# map_dfr() aplica a função 'ler_um_arquivo' em cada item da 'lista_de_arquivos'
+# e junta os resultados.
+# O '.id = "id_bacteria"' é a mágica: ele cria a coluna de ID
+# usando os nomes que definimos no Passo 1.
+
+todos_os_dados <- map_dfr(
+  lista_de_arquivos, 
+  ler_um_arquivo, 
+  .id = "id_bacteria" # <--- AQUI ESTÁ A SUA TERCEIRA COLUNA!
+)
+```
+
+#Plot
+
+```{r}
+histogram_ridgeline <- ggplot(todos_os_dados, aes(x = m_z, y = id_bacteria, fill = id_bacteria)) +
+  geom_density_ridges(
+    alpha = 0.7, 
+    show.legend = FALSE,
+    scale = 3 # Controla a sobreposição
+  ) +
+  labs(
+    title = NULL,
+    x = "m/z",
+    y = NULL
+  ) +
+  theme_minimal()
+
+ggsave(
+  filename = "histogram_plot.tiff",
+  histogram_ridgeline,
+  device = "tiff",
+  dpi = 500
+)
+
+```
+
+```{r}
+distribution <- ggplot(todos_os_dados, aes(x = m_z, y = n, colour = id_bacteria)) +
+  
+  # geom_col() desenha um "barplot" onde a altura (y) 
+  # é fornecida diretamente pela sua coluna 'n'.
+  # 'width' controla a largura da barra no eixo m/z.
+  # Ajuste 'width' para o que ficar melhor (ex: 1.0, 0.5, etc.)
+  geom_col(width = 1.0,
+           show.legend = TRUE) +
+  
+  # A "mágica" para separar por bactéria:
+  # Isso cria painéis separados para cada 'id_bacteria'.
+  # ncol = 1 os empilha verticalmente.
+  # scales = "free_y" é bom para que cada gráfico tenha seu próprio eixo Y
+  #facet_wrap(~id_bacteria, ncol = 1, scales = "free_y") +
+  
+  labs(
+    x = "m/z",
+    y = "n (-)"
+  ) +
+  theme_minimal()+
+  theme(
+    axistext = element_text(size = 12),
+    axis.title = element_text(size = 12)
+  )
+
+ggsave(
+  filename = "histogram_bars.tiff",
+  distribution,
+  device = "tiff",
+  dpi = 500, width = 12, height = 8
+)
+
+
+```
+
+#piechart_class
+
+```{r}
+
+classes_pie_limpo <- ggplot(resumo_classes_limpo, aes(x = "", y = freq_relativa, fill = class)) +
+  
+  # Cria as barras empilhadas
+  geom_bar(stat = "identity", width = 1, color = "white") +
+  
+  # Transforma em pizza
+  coord_polar("y", start = 0) +
+  
+  # Separa um gráfico para cada bactéria
+  facet_wrap(~specie) +
+  
+  # Adiciona rótulos de porcentagem (Opcional - pode ficar poluído se tiver muitas classes)
+  # geom_text(aes(label = percentual), position = position_stack(vjust = 0.5), size = 3) +
+  
+  # Estética
+  labs(
+    title = NULL,
+    fill = "ClassyFire (SIRIUS annotation)",
+    x = NULL,
+    y = NULL
+  ) +
+  theme_void() + # Remove eixos e fundo cinza, ideal para Pie Charts
+  theme(
+    strip.text = element_text(face = "bold", size = 12), # Título de cada bactéria
+    legend.position = "right", # Legenda à direita
+    legend.title = element_text(face = "bold")
+  )
+
+ggsave(
+  filename = "piechart_classyfire_limpo.tiff",
+  classes_pie_limpo,
+  device = "tiff",
+  dpi = 300, width = 12, height = 8,
+  bg = "white"
+)
+
+```
